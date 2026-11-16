@@ -32,6 +32,10 @@ class AudioScheduledSourceNode extends AudioNode {
     this._started = true
     this._startTime = when
     this._wake()
+    // Started sources advance along the context timeline even when not connected
+    // to the destination. Register as a tail node so _renderQuantum ticks it every
+    // quantum; the sleep-horizon check skips it for free until its start time.
+    this.context._tailNodes?.add(this)
   }
 
   // Sleep horizon: silent until the scheduled start; forever while unstarted
@@ -129,6 +133,11 @@ class AudioScheduledSourceNode extends AudioNode {
   // subclasses override: _dsp(offset, count) → AudioBuffer
   // offset = start sample within block, count = number of samples to produce
   _dsp(offset, count) { return this._zeroBuf }
+
+  [Symbol.dispose]() {
+    this.context._tailNodes?.delete(this)
+    super[Symbol.dispose]()
+  }
 }
 
 export default AudioScheduledSourceNode

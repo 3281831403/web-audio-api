@@ -74,9 +74,20 @@ class BaseAudioContext extends EventTarget {
   // Render one quantum: pull graph + tail nodes, advance frame counter
   _renderQuantum() {
     let buf = this._destination._tick()
-    // Process tail nodes (e.g. AnalyserNode, MediaStreamAudioDestinationNode) not in the destination graph
-    for (let node of this._tailNodes)
-      node._outputs.length ? node._outputs[0]._tick() : node._tick()
+    // Process tail nodes (e.g. AnalyserNode, MediaStreamAudioDestinationNode,
+    // started scheduled sources) not in the destination graph. Skip any whose
+    // output is provably silent this quantum so scheduled-but-idle sources
+    // (start far in the future) cost nothing.
+    let blockEnd = (this._frame + BLOCK_SIZE) / this.sampleRate
+    for (let node of this._tailNodes) {
+      if (node._outputs.length) {
+        let out = node._outputs[0]
+        if (out._horizon(blockEnd) > blockEnd) continue
+        out._tick()
+      } else {
+        node._tick()
+      }
+    }
     // Process delay nodes that deferred their ring buffer update during a cycle.
     // At this point all upstream nodes have cached outputs, so re-pulling gives correct input.
     if (this._cycle.deferred) {

@@ -348,6 +348,90 @@ test('sleep horizons > render cost is flat in the amount of scheduled-ahead work
   ok(large < Math.max(50, small * 12), `600s schedule renders in ${large.toFixed(0)}ms vs ${small.toFixed(0)}ms for 30s`)
 })
 
+test('scheduled sources > started-but-unconnected sources advance along the context timeline', async () => {
+  let sr = 44100, N = 8192, BLEN = 6000, CONNECT = 2048
+  // Fixed ramp buffer: sample value == buffer index, so the rendered value
+  // identifies the exact playback position on the buffer timeline.
+  let makeRamp = ctx => {
+    let buf = ctx.createBuffer(1, BLEN, sr)
+    let d = buf.getChannelData(0)
+    for (let i = 0; i < BLEN; i++) d[i] = i
+    return buf
+  }
+
+  // Reference: connected to destination for the whole render.
+  let refCtx = new OfflineAudioContext(1, N, sr)
+  let refSrc = refCtx.createBufferSource()
+  refSrc.buffer = makeRamp(refCtx)
+  let refEnded = null
+  refSrc.onended = () => { refEnded = refCtx.currentTime }
+  refSrc.connect(refCtx.destination)
+  refSrc.start(0)
+  let ref = (await refCtx.startRendering()).getChannelData(0)
+
+  // Late connect: started at 0 but only connected from sample CONNECT on.
+  let ctx = new OfflineAudioContext(1, N, sr)
+  let src = ctx.createBufferSource()
+  src.buffer = makeRamp(ctx)
+  let ended = null
+  src.onended = () => { ended = ctx.currentTime }
+  src.start(0)
+  ctx.suspend(CONNECT / sr).then(() => { src.connect(ctx.destination); ctx.resume() })
+  let data = (await ctx.startRendering()).getChannelData(0)
+
+  for (let i = 0; i < CONNECT; i++) if (data[i] !== 0) throw new Error(`sample ${i} nonzero before connect`)
+  for (let i = CONNECT; i < N; i++) if (data[i] !== ref[i]) throw new Error(`sample ${i} off timeline: ${data[i]} vs ${ref[i]}`)
+  is(ended, refEnded, 'ended fires at the same time as an always-connected source')
+})
+
+test('scheduled sources > disconnect then reconnect resumes the same timeline, not offset', async () => {
+  let sr = 44100, N = 8192, BLEN = 6000, OUT = 2048, BACK = 4096
+  let makeRamp = ctx => {
+    let buf = ctx.createBuffer(1, BLEN, sr)
+    let d = buf.getChannelData(0)
+    for (let i = 0; i < BLEN; i++) d[i] = i
+    return buf
+  }
+
+  let refCtx = new OfflineAudioContext(1, N, sr)
+  let refSrc = refCtx.createBufferSource()
+  refSrc.buffer = makeRamp(refCtx)
+  refSrc.connect(refCtx.destination)
+  refSrc.start(0)
+  let ref = (await refCtx.startRendering()).getChannelData(0)
+
+  let ctx = new OfflineAudioContext(1, N, sr)
+  let src = ctx.createBufferSource()
+  src.buffer = makeRamp(ctx)
+  let ended = null
+  src.onended = () => { ended = ctx.currentTime }
+  src.connect(ctx.destination)
+  src.start(0)
+  ctx.suspend(OUT / sr).then(() => { src.disconnect(); ctx.resume() })
+  ctx.suspend(BACK / sr).then(() => { src.connect(ctx.destination); ctx.resume() })
+  let data = (await ctx.startRendering()).getChannelData(0)
+
+  for (let i = 0; i < OUT; i++) if (data[i] !== ref[i]) throw new Error(`sample ${i} off timeline before disconnect`)
+  for (let i = OUT; i < BACK; i++) if (data[i] !== 0) throw new Error(`sample ${i} nonzero while disconnected`)
+  for (let i = BACK; i < N; i++) if (data[i] !== ref[i]) throw new Error(`sample ${i} off timeline after reconnect`)
+  ok(ended != null, 'ended fires after disconnect/reconnect')
+})
+
+test('scheduled sources > a source that ends unconnected fires ended and does not crash rendering', async () => {
+  let sr = 44100
+  let ctx = new OfflineAudioContext(1, 4096, sr)
+  let count = 0
+  for (let i = 0; i < 40; i++) {
+    let src = ctx.createBufferSource()
+    src.buffer = ctx.createBuffer(1, (i + 1) * 64, sr)
+    src.onended = () => { count++ }
+    src.start(0) // never connected
+  }
+  let data = (await ctx.startRendering()).getChannelData(0)
+  is(count, 40, 'every unconnected source fired ended')
+  ok(data.every(s => s === 0), 'no output from unconnected sources')
+})
+
 test('oscillator started mid-block begins at phase zero without a pop', async () => {
   let sr = 44100
   let ctx = new OfflineAudioContext(1, 1024, sr)
